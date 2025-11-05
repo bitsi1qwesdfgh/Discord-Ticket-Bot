@@ -1,0 +1,28 @@
+{
+  "name": "discord-ticket-bot",
+  "version": "1.0.0",
+  "description": "Ein Discord Ticket Bot mit Commands, Logs und Support-Funktionen.",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "keywords": [
+    "discord",
+    "ticket",
+    "bot",
+    "support",
+    "javascript"
+  ],
+  "author": "BitsundBlox",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "fs-extra": "^11.2.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}
