@@ -26,7 +26,7 @@ const client = new Client({
 });
 
 const ticketDMs = new Map();
-const pendingApplications = new Map(); // Bewerbungs-Ticket Channels speichern
+const pendingApplications = new Map(); // channelId -> { applicantId, supporterId }
 
 client.once("ready", () => {
   console.log(`✅ Bot ist online als ${client.user.tag}`);
@@ -44,7 +44,6 @@ async function ensureRole(guild, roleName, color) {
   return role;
 }
 
-// ----- Interaction Create -----
 client.on("interactionCreate", async (interaction) => {
 
   // ------------------- Slash Commands -------------------
@@ -110,7 +109,7 @@ client.on("interactionCreate", async (interaction) => {
         .setEmoji("🎫");
 
       const applicationButton = new ButtonBuilder()
-        .setCustomId("createApplication")
+        .setCustomId("openApplicationModal")
         .setLabel("Bewerbe dich als Teammitglied")
         .setStyle(ButtonStyle.Success)
         .setEmoji("📝");
@@ -209,37 +208,125 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.showModal(modal);
     }
 
-    // ---- Bewerbung starten ----
-    if (customId.startsWith("createApplication")) {
-      const applicantId = interaction.user.id;
+    // ---- Öffnet das Bewerbungs-Modal (vorher: openApplicationModal) ----
+    if (customId === "openApplicationModal") {
+      const modal = new ModalBuilder()
+        .setCustomId("applicationModal")
+        .setTitle("Teammitglied Bewerbung");
 
-      const applicationsChannel = interaction.guild.channels.cache.find(ch => ch.name === "bewerbungen") ||
-        await interaction.guild.channels.create({ name: "bewerbungen", type: ChannelType.GuildText });
+      const positionInput = new TextInputBuilder()
+        .setCustomId("position")
+        .setLabel("Als was willst du dich bewerben?")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
 
-      const embed = new EmbedBuilder()
-        .setTitle("📝 Neue Bewerbung")
-        .setDescription(`Bewerber: <@${applicantId}>`)
-        .setColor(0x00ff00);
+      const whyInput = new TextInputBuilder()
+        .setCustomId("why")
+        .setLabel("Warum willst du dich bewerben?")
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true);
 
-      const buttons = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`accept_${applicantId}`)
-          .setLabel("✅ Annehmen")
-          .setStyle(ButtonStyle.Success),
-        new ButtonBuilder()
-          .setCustomId(`decline_${applicantId}`)
-          .setLabel("❌ Ablehnen")
-          .setStyle(ButtonStyle.Danger)
+      const timeInput = new TextInputBuilder()
+        .setCustomId("onlineTime")
+        .setLabel("Wie lange kannst du online sein pro Tag?")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(positionInput),
+        new ActionRowBuilder().addComponents(whyInput),
+        new ActionRowBuilder().addComponents(timeInput)
       );
 
-      await applicationsChannel.send({ embeds: [embed], components: [buttons] });
-      await interaction.reply({ content: "✅ Deine Bewerbung wurde in #bewerbungen gepostet!", ephemeral: true });
+      await interaction.showModal(modal);
+    }
+
+    // ---- Accept/Decline Buttons (in #bewerbungen) ----
+    if (customId.startsWith("accept_") || customId.startsWith("decline_")) {
+      const parts = customId.split("_");
+      const action = parts[0]; // "accept" or "decline"
+      const applicantId = parts[1];
+      const guild = interaction.guild;
+
+      // fetch member safely
+      let applicantMember;
+      try {
+        applicantMember = await guild.members.fetch(applicantId);
+      } catch {
+        applicantMember = null;
+      }
+
+      if (action === "accept") {
+        // Erstelle privaten Channel für Bewerbungsgespräch (nur Bewerber + der klickende Supporter)
+        const channel = await guild.channels.create({
+          name: `bewerbung-${applicantMember ? applicantMember.user.username : applicantId}`,
+          type: ChannelType.GuildText,
+          permissionOverwrites: [
+            { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+            { id: applicantId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+            { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+          ],
+        });
+
+        // store pending application
+        pendingApplications.set(channel.id, { applicantId, supporterId: interaction.user.id });
+
+        // send starter message with a button to cancel/close (optional)
+        const starterEmbed = new EmbedBuilder()
+          .setTitle("Bewerbungsgespräch")
+          .setDescription(`Dies ist ein privater Kanal zwischen <@${applicantId}> und <@${interaction.user.id}>. Nutzt /accept oder /decline um die Bewerbung abzuschließen.`)
+          .setColor(0x00ff00);
+
+        const cancelRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`cancel_bewerbung_${channel.id}`)
+            .setLabel("Bewerbung zurückziehen / Channel löschen")
+            .setStyle(ButtonStyle.Secondary)
+        );
+
+        await channel.send({ content: `<@${applicantId}> <@${interaction.user.id}>`, embeds: [starterEmbed], components: [cancelRow] });
+
+        // update original message to show accepted and disable buttons
+        await interaction.update({ content: `Bewerbung von <@${applicantId}> angenommen. Channel erstellt: ${channel}`, components: [] });
+      } else {
+        // decline flow: post in bewerbungen channel and DM
+        const applicationsChannel = guild.channels.cache.find(ch => ch.name === "bewerbungen");
+        if (applicationsChannel) await applicationsChannel.send(`❌ Bewerbung von <@${applicantId}> wurde abgelehnt.`);
+        if (applicantMember) {
+          try { await applicantMember.send("❌ Deine Bewerbung wurde leider abgelehnt."); } catch {}
+        }
+        await interaction.update({ content: `Bewerbung von <@${applicantId}> abgelehnt.`, components: [] });
+      }
+    }
+
+    // ---- Ticket close button ----
+    if (customId.startsWith("closeTicket_")) {
+      const channelId = customId.split("_")[1];
+      const channel = interaction.guild.channels.cache.get(channelId);
+      if (!channel) return interaction.reply({ content: "❌ Ticket-Kanal nicht gefunden!", ephemeral: true });
+
+      await channel.delete().catch(() => null);
+      await interaction.reply({ content: "✅ Ticket wurde geschlossen.", ephemeral: true });
+    }
+
+    // ---- cancel Bewerbungs-Channel button (falls Bewerber zurückziehen) ----
+    if (customId.startsWith("cancel_bewerbung_")) {
+      const channelId = customId.split("cancel_bewerbung_")[1];
+      const channel = interaction.guild.channels.cache.get(channelId);
+      if (channel) await channel.delete().catch(() => null);
+      await interaction.update({ content: "Bewerbungsgespräch wurde beendet und der Channel gelöscht.", components: [] });
     }
   }
 
   // ------------------- Modal Submit -------------------
   if (interaction.isModalSubmit()) {
     const { customId } = interaction;
+
+    if (customId === "helloModal") {
+      const name = interaction.fields.getTextInputValue("nameInput");
+      const message = interaction.fields.getTextInputValue("messageInput");
+      await interaction.reply({ content: `👋 Hallo **${name}**!\n📝 Deine Nachricht:\n${message}`, ephemeral: true });
+    }
 
     if (customId === "ticketModal") {
       const minecraftUsername = interaction.fields.getTextInputValue("minecraftUsername");
@@ -269,6 +356,45 @@ client.on("interactionCreate", async (interaction) => {
       await channel.send({ content: `<@${interaction.user.id}>`, embeds: [embed], components: [row] });
       await interaction.reply({ content: `✅ Dein Ticket wurde erstellt: ${channel}`, ephemeral: true });
       ticketDMs.set(channel.id, { userId: interaction.user.id, channelId: channel.id });
+    }
+
+    // ---- application modal submit: send embed to #bewerbungen with accept/decline buttons ----
+    if (customId === "applicationModal") {
+      const position = interaction.fields.getTextInputValue("position");
+      const why = interaction.fields.getTextInputValue("why");
+      const onlineTime = interaction.fields.getTextInputValue("onlineTime");
+
+      const guild = interaction.guild;
+      let applicationChannel = guild.channels.cache.find(ch => ch.name === "bewerbungen");
+
+      if (!applicationChannel) {
+        applicationChannel = await guild.channels.create({
+          name: "bewerbungen",
+          type: ChannelType.GuildText,
+        });
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle("📝 Neue Bewerbung")
+        .setDescription(
+          `**Von:** <@${interaction.user.id}>\n**Position:** ${position}\n**Begründung:** ${why}\n**Onlinezeit:** ${onlineTime}`
+        )
+        .setColor(0x00ff00)
+        .setTimestamp();
+
+      const buttons = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`accept_${interaction.user.id}`)
+          .setLabel("✅ Annehmen")
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(`decline_${interaction.user.id}`)
+          .setLabel("❌ Ablehnen")
+          .setStyle(ButtonStyle.Danger)
+      );
+
+      await applicationChannel.send({ embeds: [embed], components: [buttons] });
+      await interaction.reply({ content: "✅ Deine Bewerbung wurde in #bewerbungen gepostet!", ephemeral: true });
     }
   }
 });
