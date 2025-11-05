@@ -274,6 +274,7 @@ client.on("interactionCreate", async (interaction) => {
       ticketDMs.set(channel.id, { userId: interaction.user.id, channelId: channel.id });
     }
 
+    // --- Bewerbungsmodal mit Buttons ---
     if (id === "applicationModal") {
       const position = interaction.fields.getTextInputValue("position");
       const why = interaction.fields.getTextInputValue("why");
@@ -297,8 +298,36 @@ client.on("interactionCreate", async (interaction) => {
         .setColor(0x00ff00)
         .setTimestamp();
 
-      await applicationChannel.send({ embeds: [embed] });
+      // Buttons hinzufügen
+      const buttons = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("accept_application")
+          .setLabel("✅ Annehmen")
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId("reject_application")
+          .setLabel("❌ Ablehnen")
+          .setStyle(ButtonStyle.Danger)
+      );
+
+      const message = await applicationChannel.send({ embeds: [embed], components: [buttons] });
       await interaction.reply({ content: "✅ Deine Bewerbung wurde erfolgreich abgeschickt!", ephemeral: true });
+
+      const collector = message.createMessageComponentCollector({ time: 0 });
+      collector.on("collect", async (buttonInteraction) => {
+        if (buttonInteraction.user.bot) return;
+        const applicant = interaction.user;
+
+        if (buttonInteraction.customId === "accept_application") {
+          await applicant.send(`✅ Deine Bewerbung für **${position}** wurde akzeptiert!`);
+          await buttonInteraction.update({ content: "Bewerbung akzeptiert ✅", components: [] });
+        }
+
+        if (buttonInteraction.customId === "reject_application") {
+          await applicant.send(`❌ Deine Bewerbung für **${position}** wurde leider abgelehnt.`);
+          await buttonInteraction.update({ content: "Bewerbung abgelehnt ❌", components: [] });
+        }
+      });
     }
   }
 });
@@ -341,3 +370,4 @@ client.login(process.env.DISCORD_BOT_TOKEN)
     console.error("❌ Login fehlgeschlagen:", error);
     process.exit(1);
   });
+
