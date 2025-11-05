@@ -26,6 +26,7 @@ const client = new Client({
 });
 
 const ticketDMs = new Map();
+const pendingApplications = new Map(); // Bewerbungs-Ticket Channels speichern
 
 client.once("ready", () => {
   console.log(`✅ Bot ist online als ${client.user.tag}`);
@@ -43,12 +44,13 @@ async function ensureRole(guild, roleName, color) {
   return role;
 }
 
+// ----- Interaction Create -----
 client.on("interactionCreate", async (interaction) => {
 
-  // ----- Slash Commands -----
+  // ------------------- Slash Commands -------------------
   if (interaction.isChatInputCommand()) {
 
-    // /hello
+    // ---- /hello ----
     if (interaction.commandName === "hello") {
       const modal = new ModalBuilder()
         .setCustomId("helloModal")
@@ -76,7 +78,7 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.showModal(modal);
     }
 
-    // /ticket setup
+    // ---- /ticket setup ----
     if (interaction.commandName === "ticket" && interaction.options.getSubcommand() === "setup") {
       await interaction.deferReply({ ephemeral: true });
 
@@ -122,7 +124,7 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // /bmessage
+    // ---- /bmessage ----
     if (interaction.commandName === "bmessage") {
       const messageText = interaction.options.getString("message");
       const channel = interaction.options.getChannel("channel");
@@ -133,7 +135,7 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.reply({ content: `✅ Nachricht wurde an ${channel} gesendet.`, ephemeral: true });
     }
 
-    // /regeln
+    // ---- /regeln ----
     if (interaction.commandName === "regeln") {
       await interaction.deferReply({ ephemeral: true });
 
@@ -150,14 +152,39 @@ client.on("interactionCreate", async (interaction) => {
       await rulesChannel.send(rulesMessage);
       await interaction.editReply({ content: `✅ Regeln wurden in ${rulesChannel} gepostet!` });
     }
+
+    // ---- Bewerbungs Slash Commands (Accept / Decline in privatem Channel) ----
+    if (interaction.commandName === "accept" || interaction.commandName === "decline") {
+      const data = pendingApplications.get(interaction.channel.id);
+      if (!data) return interaction.reply({ content: "❌ Dieser Channel ist kein Bewerbungsgespräch.", ephemeral: true });
+      if (data.supporterId !== interaction.user.id) return interaction.reply({ content: "❌ Nur der Supporter kann diese Bewerbung abschließen.", ephemeral: true });
+
+      const applicant = await interaction.guild.members.fetch(data.applicantId);
+      const applicationsChannel = interaction.guild.channels.cache.find(ch => ch.name === "bewerbungen");
+
+      if (interaction.commandName === "accept") {
+        const role = interaction.guild.roles.cache.find(r => r.name === "Teammitglied");
+        if (role) await applicant.roles.add(role);
+        if (applicationsChannel) await applicationsChannel.send(`✅ <@${data.applicantId}> wurde erfolgreich als Teammitglied angenommen!`);
+        await applicant.send("✅ Herzlichen Glückwunsch! Du wurdest als Teammitglied angenommen.");
+        await interaction.reply({ content: "Bewerbung akzeptiert und Rolle vergeben!", ephemeral: true });
+      } else {
+        if (applicationsChannel) await applicationsChannel.send(`❌ Bewerbung von <@${data.applicantId}> wurde abgelehnt.`);
+        await applicant.send("❌ Deine Bewerbung wurde leider abgelehnt.");
+        await interaction.reply({ content: "Bewerbung abgelehnt!", ephemeral: true });
+      }
+
+      await interaction.channel.delete().catch(() => null);
+      pendingApplications.delete(interaction.channel.id);
+    }
   }
 
-  // ----- Button Interaction -----
+  // ------------------- Button Interaction -------------------
   if (interaction.isButton()) {
-    const id = interaction.customId;
+    const { customId } = interaction;
 
-    // Ticket erstellen
-    if (id === "createTicket") {
+    // ---- Ticket Buttons ----
+    if (customId === "createTicket") {
       const modal = new ModalBuilder()
         .setCustomId("ticketModal")
         .setTitle("Support Ticket erstellen");
@@ -182,77 +209,48 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.showModal(modal);
     }
 
-    // Bewerbung erstellen
-    if (id === "createApplication") {
-      const modal = new ModalBuilder()
-        .setCustomId("applicationModal")
-        .setTitle("Teammitglied Bewerbung");
+    // ---- Bewerbung starten ----
+    if (customId.startsWith("createApplication")) {
+      const applicantId = interaction.user.id;
 
-      const positionInput = new TextInputBuilder()
-        .setCustomId("position")
-        .setLabel("Als was willst du dich bewerben?")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
+      const applicationsChannel = interaction.guild.channels.cache.find(ch => ch.name === "bewerbungen") ||
+        await interaction.guild.channels.create({ name: "bewerbungen", type: ChannelType.GuildText });
 
-      const whyInput = new TextInputBuilder()
-        .setCustomId("why")
-        .setLabel("Warum willst du dich bewerben?")
-        .setStyle(TextInputStyle.Paragraph)
-        .setRequired(true);
+      const embed = new EmbedBuilder()
+        .setTitle("📝 Neue Bewerbung")
+        .setDescription(`Bewerber: <@${applicantId}>`)
+        .setColor(0x00ff00);
 
-      const timeInput = new TextInputBuilder()
-        .setCustomId("onlineTime")
-        .setLabel("Wie lange kannst du online sein pro Tag?")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true);
-
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(positionInput),
-        new ActionRowBuilder().addComponents(whyInput),
-        new ActionRowBuilder().addComponents(timeInput)
+      const buttons = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`accept_${applicantId}`)
+          .setLabel("✅ Annehmen")
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(`decline_${applicantId}`)
+          .setLabel("❌ Ablehnen")
+          .setStyle(ButtonStyle.Danger)
       );
 
-      await interaction.showModal(modal);
-    }
-
-    // Ticket schließen
-    if (id.startsWith("closeTicket_")) {
-      const channelId = id.split("_")[1];
-      const channel = interaction.guild.channels.cache.get(channelId);
-      if (!channel) return interaction.reply({ content: "❌ Ticket-Kanal nicht gefunden!", ephemeral: true });
-
-      await channel.delete().catch(() => null);
-      await interaction.reply({ content: "✅ Ticket wurde geschlossen.", ephemeral: true });
+      await applicationsChannel.send({ embeds: [embed], components: [buttons] });
+      await interaction.reply({ content: "✅ Deine Bewerbung wurde in #bewerbungen gepostet!", ephemeral: true });
     }
   }
 
-  // ----- Modal Submit -----
+  // ------------------- Modal Submit -------------------
   if (interaction.isModalSubmit()) {
-    const id = interaction.customId;
+    const { customId } = interaction;
 
-    if (id === "helloModal") {
-      const name = interaction.fields.getTextInputValue("nameInput");
-      const message = interaction.fields.getTextInputValue("messageInput");
-      await interaction.reply({ content: `👋 Hallo **${name}**!\n📝 Deine Nachricht:\n${message}`, ephemeral: true });
-    }
-
-    if (id === "ticketModal") {
+    if (customId === "ticketModal") {
       const minecraftUsername = interaction.fields.getTextInputValue("minecraftUsername");
       const reason = interaction.fields.getTextInputValue("ticketReason");
 
-      const guild = interaction.guild;
-      const channel = await guild.channels.create({
+      const channel = await interaction.guild.channels.create({
         name: `ticket-${interaction.user.username}`,
         type: ChannelType.GuildText,
         permissionOverwrites: [
-          {
-            id: guild.id,
-            deny: [PermissionFlagsBits.ViewChannel],
-          },
-          {
-            id: interaction.user.id,
-            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory],
-          },
+          { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+          { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
         ],
       });
 
@@ -270,69 +268,12 @@ client.on("interactionCreate", async (interaction) => {
 
       await channel.send({ content: `<@${interaction.user.id}>`, embeds: [embed], components: [row] });
       await interaction.reply({ content: `✅ Dein Ticket wurde erstellt: ${channel}`, ephemeral: true });
-
       ticketDMs.set(channel.id, { userId: interaction.user.id, channelId: channel.id });
-    }
-
-    // --- Bewerbungsmodal mit Buttons ---
-    if (id === "applicationModal") {
-      const position = interaction.fields.getTextInputValue("position");
-      const why = interaction.fields.getTextInputValue("why");
-      const onlineTime = interaction.fields.getTextInputValue("onlineTime");
-
-      const guild = interaction.guild;
-      let applicationChannel = guild.channels.cache.find(ch => ch.name === "📋bewerbungen");
-
-      if (!applicationChannel) {
-        applicationChannel = await guild.channels.create({
-          name: "📋bewerbungen",
-          type: ChannelType.GuildText,
-        });
-      }
-
-      const embed = new EmbedBuilder()
-        .setTitle("📝 Neue Bewerbung")
-        .setDescription(
-          `**Von:** <@${interaction.user.id}>\n**Position:** ${position}\n**Begründung:** ${why}\n**Onlinezeit:** ${onlineTime}`
-        )
-        .setColor(0x00ff00)
-        .setTimestamp();
-
-      // Buttons hinzufügen
-      const buttons = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("accept_application")
-          .setLabel("✅ Annehmen")
-          .setStyle(ButtonStyle.Success),
-        new ButtonBuilder()
-          .setCustomId("reject_application")
-          .setLabel("❌ Ablehnen")
-          .setStyle(ButtonStyle.Danger)
-      );
-
-      const message = await applicationChannel.send({ embeds: [embed], components: [buttons] });
-      await interaction.reply({ content: "✅ Deine Bewerbung wurde erfolgreich abgeschickt!", ephemeral: true });
-
-      const collector = message.createMessageComponentCollector({ time: 0 });
-      collector.on("collect", async (buttonInteraction) => {
-        if (buttonInteraction.user.bot) return;
-        const applicant = interaction.user;
-
-        if (buttonInteraction.customId === "accept_application") {
-          await applicant.send(`✅ Deine Bewerbung für **${position}** wurde akzeptiert!`);
-          await buttonInteraction.update({ content: "Bewerbung akzeptiert ✅", components: [] });
-        }
-
-        if (buttonInteraction.customId === "reject_application") {
-          await applicant.send(`❌ Deine Bewerbung für **${position}** wurde leider abgelehnt.`);
-          await buttonInteraction.update({ content: "Bewerbung abgelehnt ❌", components: [] });
-        }
-      });
     }
   }
 });
 
-// ----- Register Commands -----
+// ----- Slash Commands Registrieren -----
 async function registerCommands() {
   const commands = [
     new SlashCommandBuilder().setName("hello").setDescription("Öffnet ein Formular zum Ausfüllen"),
@@ -343,13 +284,11 @@ async function registerCommands() {
     new SlashCommandBuilder()
       .setName("bmessage")
       .setDescription("Lass den Bot eine Nachricht senden")
-      .addChannelOption(option =>
-        option.setName("channel").setDescription("Wähle den Kanal").setRequired(true)
-      )
-      .addStringOption(option =>
-        option.setName("message").setDescription("Gib die Nachricht ein").setRequired(true)
-      ),
+      .addChannelOption(option => option.setName("channel").setDescription("Wähle den Kanal").setRequired(true))
+      .addStringOption(option => option.setName("message").setDescription("Gib die Nachricht ein").setRequired(true)),
     new SlashCommandBuilder().setName("regeln").setDescription("Postet die Regeln im Kanal #regeln"),
+    new SlashCommandBuilder().setName("accept").setDescription("Bewerbung akzeptieren"),
+    new SlashCommandBuilder().setName("decline").setDescription("Bewerbung ablehnen"),
   ].map(cmd => cmd.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_BOT_TOKEN);
@@ -364,10 +303,4 @@ async function registerCommands() {
 }
 
 // ----- Login -----
-client.login(process.env.DISCORD_BOT_TOKEN)
-  .then(() => registerCommands())
-  .catch(error => {
-    console.error("❌ Login fehlgeschlagen:", error);
-    process.exit(1);
-  });
-
+client.login(process.env.DISCORD_BOT_TOKEN).then(registerCommands);
